@@ -4,6 +4,7 @@ import { logger } from "hono/logger"
 
 import { completionRoutes } from "./routes/chat-completions/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
+import { geminiRoutes } from "./routes/gemini/route"
 import { messageRoutes } from "./routes/messages/route"
 import { modelRoutes } from "./routes/models/route"
 import { responsesRoute } from "./routes/responses/route"
@@ -33,3 +34,7 @@ server.route("/v1/messages", messageRoutes)
 
 // OpenAI Responses API (used by codex-rs)
 server.route("/v1/responses", responsesRoute)
+
+// Gemini API compatible endpoints (used by gemini-cli)
+server.route("/v1beta/models", geminiRoutes)
+server.route("/v1/models", geminiRoutes)
