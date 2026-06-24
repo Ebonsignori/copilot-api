@@ -128,11 +128,23 @@ export async function runWebSearchLoop(
   // that CANNOT contain another tool_use: strip the tools ENTIRELY (not just
   // tool_choice). The Copilot backend ignores tool_choice:"none" and keeps
   // emitting tool_use; but with no tools defined at all, it must answer in text.
+  // Add an explicit instruction so the model composes an answer from the search
+  // results it already gathered, rather than stalling.
   consola.debug(`Web search budget (${rounds}) reached; forcing final answer`)
   const finalPayload: ChatCompletionsPayload = {
     ...payload,
     tools: undefined,
     tool_choice: undefined,
+    messages: [
+      ...payload.messages,
+      {
+        role: "user",
+        content:
+          "You have used all available web searches for this request. Answer now"
+          + " using the search results above. Do not request another search;"
+          + " give your best answer from what you found, noting any uncertainty.",
+      },
+    ],
   }
   const finalResponse = await complete(finalPayload)
 
