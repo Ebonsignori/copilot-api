@@ -6,6 +6,7 @@ import { streamSSE } from "hono/streaming"
 import { awaitApproval } from "~/lib/approval"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
+import { webSearchEnabled } from "~/lib/web-search"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
@@ -21,6 +22,8 @@ import {
   translateToOpenAI,
 } from "./non-stream-translation"
 import { translateChunkToAnthropicEvents } from "./stream-translation"
+import { anthropicResponseToStreamEvents } from "./synthesize-stream"
+import { runWebSearchLoop } from "./web-search-loop"
 
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
@@ -36,6 +39,14 @@ export async function handleCompletion(c: Context) {
 
   if (state.manualApprove) {
     await awaitApproval()
+  }
+
+  // When the request carries Anthropic's server-side web_search tool and a
+  // broker is configured, run the search loop entirely server-side (emulating
+  // Anthropic's hosted behavior) and return a finished answer. Claude Code's
+  // built-in WebSearch then "just works" through the proxy.
+  if (webSearchEnabled(anthropicPayload.tools)) {
+    return handleWebSearch(c, anthropicPayload, openAIPayload)
   }
 
   const response = await createChatCompletions(openAIPayload)
@@ -89,3 +100,44 @@ export async function handleCompletion(c: Context) {
 const isNonStreaming = (
   response: Awaited<ReturnType<typeof createChatCompletions>>,
 ): response is ChatCompletionResponse => Object.hasOwn(response, "choices")
+
+// Pull the web_search tool's max_uses (if the client set one) to bound the loop.
+function webSearchMaxUses(
+  payload: AnthropicMessagesPayload,
+): number | undefined {
+  const tool = payload.tools?.find(
+    (t): t is typeof t & { max_uses?: number } => t.name === "web_search",
+  )
+  const raw = (tool as { max_uses?: number } | undefined)?.max_uses
+  return typeof raw === "number" && raw > 0 ? raw : undefined
+}
+
+// Service the request's web_search tool server-side, then return the finished
+// answer to the client — as JSON for a non-streaming request, or as a
+// synthesized SSE stream for a streaming one. Either way the client receives a
+// normal assistant turn (text, or a passed-through client-side tool_use) and
+// never a dangling web_search tool_use.
+async function handleWebSearch(
+  c: Context,
+  anthropicPayload: AnthropicMessagesPayload,
+  openAIPayload: ReturnType<typeof translateToOpenAI>,
+) {
+  consola.debug("Handling web_search via broker loop")
+  const finalResponse = await runWebSearchLoop(
+    openAIPayload,
+    webSearchMaxUses(anthropicPayload),
+  )
+  const anthropicResponse = translateToAnthropic(finalResponse)
+
+  if (!anthropicPayload.stream) {
+    return c.json(anthropicResponse)
+  }
+
+  // Synthesize the streaming form from the finished message so streaming
+  // clients (Claude Code) get the SSE event sequence they expect.
+  return streamSSE(c, async (stream) => {
+    for (const event of anthropicResponseToStreamEvents(anthropicResponse)) {
+      await stream.writeSSE({ event: event.type, data: JSON.stringify(event) })
+    }
+  })
+}

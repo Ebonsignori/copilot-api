@@ -47,6 +47,16 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
 
+  // Web search broker config. Read from the environment (set in the launchd/
+  // systemd unit) rather than a CLI flag — it carries a secret token and the
+  // proxy is typically launched by a service manager, not by hand. Both must be
+  // present to enable interception; otherwise web_search behaves as before.
+  state.searchServiceUrl = process.env.SEARCH_SERVICE_URL
+  state.searchServiceToken = process.env.SEARCH_SERVICE_TOKEN
+  if (state.searchServiceUrl && state.searchServiceToken) {
+    consola.info(`Web search interception enabled via ${state.searchServiceUrl}`)
+  }
+
   await ensurePaths()
   await cacheVSCodeVersion()
 
