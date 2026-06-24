@@ -124,10 +124,55 @@ export async function runWebSearchLoop(
     }
   }
 
-  // Budget spent and the model still wants to search. Force a final answer with
-  // no further tool use so we never return a dangling tool_use to the client.
+  // Budget spent and the model still wants to search. Produce a final answer
+  // that CANNOT contain another tool_use: strip the tools ENTIRELY (not just
+  // tool_choice). The Copilot backend ignores tool_choice:"none" and keeps
+  // emitting tool_use; but with no tools defined at all, it must answer in text.
   consola.debug(`Web search budget (${rounds}) reached; forcing final answer`)
-  return complete({ ...payload, tool_choice: "none" })
+  const finalPayload: ChatCompletionsPayload = {
+    ...payload,
+    tools: undefined,
+    tool_choice: undefined,
+  }
+  const finalResponse = await complete(finalPayload)
+
+  // Defense in depth: if the backend STILL returned tool calls despite having no
+  // tools, strip them so the client never receives a dangling tool_use it can't
+  // satisfy (the whole reason this interception exists).
+  return stripToolCalls(finalResponse)
+}
+
+// Guarantee a response with no tool_calls. If the upstream still emitted tool
+// calls (it shouldn't, with tools removed), drop them and ensure there is text
+// content so the translated Anthropic message ends cleanly (end_turn) rather
+// than with a dangling tool_use.
+function stripToolCalls(
+  response: ChatCompletionResponse,
+): ChatCompletionResponse {
+  const choice = response.choices[0]
+  if (!choice?.message.tool_calls?.length) return response
+  const hasText =
+    typeof choice.message.content === "string"
+    && choice.message.content.trim().length > 0
+  return {
+    ...response,
+    choices: response.choices.map((c, i) =>
+      i === 0 ?
+        {
+          ...c,
+          finish_reason: "stop",
+          message: {
+            ...c.message,
+            tool_calls: undefined,
+            content:
+              hasText ? c.message.content : (
+                "I couldn't complete the web search for this request."
+              ),
+          },
+        }
+      : c,
+    ),
+  }
 }
 
 // Default completion: the real upstream call, with a guard that we never get a
