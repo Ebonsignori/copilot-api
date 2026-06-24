@@ -6,7 +6,11 @@ import {
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 
-import { isWebSearchToolName, runWebSearch } from "~/lib/web-search"
+import {
+  isWebSearchToolName,
+  runWebSearchDetailed,
+  type SearchRecord,
+} from "~/lib/web-search"
 
 // Default cap on web_search rounds when the request's tool doesn't specify
 // max_uses. Each round may service several parallel searches.
@@ -46,9 +50,18 @@ export function ensureWebSearchSchema(payload: ChatCompletionsPayload): void {
   }
 }
 
-// Run the web_search agentic loop entirely server-side and return the FINAL
+// The loop returns the final completion AND the searches it executed (in order),
+// so the handler can emit faithful server_tool_use + web_search_tool_result
+// blocks for Claude Code's source UI + "Did N searches" count.
+export interface WebSearchLoopResult {
+  response: ChatCompletionResponse
+  searches: Array<SearchRecord>
+}
+
+// Run the web_search agentic loop entirely server-side. Returns the FINAL
 // non-streaming completion (a normal text answer, or — for non-web_search tool
-// calls — the upstream response passed straight through for Claude Code to run).
+// calls — the upstream response passed straight through for Claude Code to run)
+// plus the ordered list of searches executed.
 //
 // The loop operates on the OpenAI payload: it appends the assistant's tool_calls
 // message and a `tool` result message per search, then re-asks, mirroring how a
@@ -58,22 +71,21 @@ export function ensureWebSearchSchema(payload: ChatCompletionsPayload): void {
 // across this ecosystem):
 //   deps.complete — async (payload) => ChatCompletionResponse (default: the real
 //                   createChatCompletions, forced non-streaming).
-//   deps.search   — async (argsJson) => string tool-result (default: runWebSearch
-//                   against the broker).
+//   deps.search   — async (argsJson) => SearchRecord (default: the broker call).
 export interface WebSearchLoopDeps {
   complete?: (
     payload: ChatCompletionsPayload,
   ) => Promise<ChatCompletionResponse>
-  search?: (argsJson: string) => Promise<string>
+  search?: (argsJson: string) => Promise<SearchRecord>
 }
 
 export async function runWebSearchLoop(
   openAIPayload: ChatCompletionsPayload,
   maxUses: number = DEFAULT_MAX_USES,
   deps: WebSearchLoopDeps = {},
-): Promise<ChatCompletionResponse> {
+): Promise<WebSearchLoopResult> {
   const complete = deps.complete ?? defaultComplete
-  const search = deps.search ?? runWebSearch
+  const search = deps.search ?? runWebSearchDetailed
 
   // Work on a copy with streaming forced off and its own messages array so we
   // never mutate the caller's payload.
@@ -85,6 +97,7 @@ export async function runWebSearchLoop(
   ensureWebSearchSchema(payload)
 
   const rounds = Math.max(1, Math.min(HARD_CAP, maxUses))
+  const searches: Array<SearchRecord> = []
 
   for (let i = 0; i < rounds; i++) {
     const response = await complete(payload)
@@ -94,7 +107,7 @@ export async function runWebSearchLoop(
 
     // Normal text finish, or no tool calls → done.
     if (!choice || choice.finish_reason !== "tool_calls" || !toolCalls?.length) {
-      return response
+      return { response, searches }
     }
 
     // Only auto-service when EVERY tool call is web_search. If the model also
@@ -105,7 +118,7 @@ export async function runWebSearchLoop(
       isWebSearchToolName(tc.function.name),
     )
     if (!allWebSearch) {
-      return response
+      return { response, searches }
     }
 
     // Append the assistant turn (its tool_calls) then a tool result per search.
@@ -115,11 +128,12 @@ export async function runWebSearchLoop(
       tool_calls: toolCalls,
     })
     for (const tc of toolCalls) {
-      const content = await search(tc.function.arguments)
+      const record = await search(tc.function.arguments)
+      searches.push(record)
       payload.messages.push({
         role: "tool",
         tool_call_id: tc.id,
-        content,
+        content: record.text,
       })
     }
   }
@@ -151,7 +165,7 @@ export async function runWebSearchLoop(
   // Defense in depth: if the backend STILL returned tool calls despite having no
   // tools, strip them so the client never receives a dangling tool_use it can't
   // satisfy (the whole reason this interception exists).
-  return stripToolCalls(finalResponse)
+  return { response: stripToolCalls(finalResponse), searches }
 }
 
 // Guarantee a response with no tool_calls. If the upstream still emitted tool

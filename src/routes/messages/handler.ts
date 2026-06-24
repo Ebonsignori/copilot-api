@@ -23,6 +23,7 @@ import {
 } from "./non-stream-translation"
 import { translateChunkToAnthropicEvents } from "./stream-translation"
 import { anthropicResponseToStreamEvents } from "./synthesize-stream"
+import { buildSearchBlocks } from "./web-search-blocks"
 import { runWebSearchLoop } from "./web-search-loop"
 
 export async function handleCompletion(c: Context) {
@@ -116,18 +117,30 @@ function webSearchMaxUses(
 // answer to the client — as JSON for a non-streaming request, or as a
 // synthesized SSE stream for a streaming one. Either way the client receives a
 // normal assistant turn (text, or a passed-through client-side tool_use) and
-// never a dangling web_search tool_use.
+// never a dangling web_search tool_use. The searches the proxy ran are emitted
+// as faithful server_tool_use + web_search_tool_result blocks so Claude Code
+// shows the search count and clickable sources.
 async function handleWebSearch(
   c: Context,
   anthropicPayload: AnthropicMessagesPayload,
   openAIPayload: ReturnType<typeof translateToOpenAI>,
 ) {
   consola.debug("Handling web_search via broker loop")
-  const finalResponse = await runWebSearchLoop(
+  const { response, searches } = await runWebSearchLoop(
     openAIPayload,
     webSearchMaxUses(anthropicPayload),
   )
-  const anthropicResponse = translateToAnthropic(finalResponse)
+  const anthropicResponse = translateToAnthropic(response)
+
+  // Prepend the search blocks (in execution order) before the model's text, and
+  // record the search count in usage so Claude Code's "Did N searches" is right.
+  const searchBlocks = buildSearchBlocks(searches, anthropicResponse.id)
+  if (searchBlocks.length > 0) {
+    anthropicResponse.content = [...searchBlocks, ...anthropicResponse.content]
+    anthropicResponse.usage.server_tool_use = {
+      web_search_requests: searches.length,
+    }
+  }
 
   if (!anthropicPayload.stream) {
     return c.json(anthropicResponse)

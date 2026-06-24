@@ -73,6 +73,34 @@ export function anthropicResponseToStreamEvents(
         },
       })
       events.push({ type: "content_block_stop", index })
+    } else if (block.type === "server_tool_use") {
+      // server_tool_use starts WITHOUT input; the query streams as input_json_delta.
+      events.push({
+        type: "content_block_start",
+        index,
+        content_block: { type: "server_tool_use", id: block.id, name: block.name },
+      })
+      events.push({
+        type: "content_block_delta",
+        index,
+        delta: {
+          type: "input_json_delta",
+          partial_json: JSON.stringify(block.input),
+        },
+      })
+      events.push({ type: "content_block_stop", index })
+    } else if (block.type === "web_search_tool_result") {
+      // web_search_tool_result is sent WHOLE in content_block_start — no deltas.
+      events.push({
+        type: "content_block_start",
+        index,
+        content_block: {
+          type: "web_search_tool_result",
+          tool_use_id: block.tool_use_id,
+          content: block.content,
+        },
+      })
+      events.push({ type: "content_block_stop", index })
     } else {
       // thinking blocks aren't produced by the web_search path; skip safely.
     }
@@ -89,6 +117,9 @@ export function anthropicResponseToStreamEvents(
       output_tokens: response.usage.output_tokens,
       ...(response.usage.cache_read_input_tokens !== undefined && {
         cache_read_input_tokens: response.usage.cache_read_input_tokens,
+      }),
+      ...(response.usage.server_tool_use !== undefined && {
+        server_tool_use: response.usage.server_tool_use,
       }),
     },
   })

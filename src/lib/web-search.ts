@@ -89,9 +89,29 @@ export function formatResultsForModel(resp: BrokerResponse): string {
   return lines.join("\n")
 }
 
-// Run the broker for one tool call's arguments, converting any failure into a
-// model-readable string so a single bad search never aborts the turn.
-export async function runWebSearch(argsJson: string): Promise<string> {
+// One executed search, captured so the handler can emit faithful Anthropic
+// server_tool_use + web_search_tool_result blocks. `text` is what the model
+// reads (the OpenAI tool message); `results` is the structured data for blocks.
+// `errorCode` is set (and results empty) when the search couldn't run.
+export interface SearchRecord {
+  query: string
+  text: string
+  results: Array<BrokerResult>
+  errorCode?:
+    | "too_many_requests"
+    | "unavailable"
+    | "invalid_input"
+    | "max_uses_exceeded"
+    | "query_too_long"
+}
+
+// Run the broker for one tool call's arguments, returning BOTH the model-facing
+// text and the structured results/error. Never throws — a failed search becomes
+// a record with an errorCode and a model-readable text, so one bad search never
+// aborts the turn.
+export async function runWebSearchDetailed(
+  argsJson: string,
+): Promise<SearchRecord> {
   let query = ""
   let count: number | undefined
   try {
@@ -99,18 +119,45 @@ export async function runWebSearch(argsJson: string): Promise<string> {
     query = typeof parsed.query === "string" ? parsed.query : ""
     count = typeof parsed.count === "number" ? parsed.count : undefined
   } catch {
-    return "Web search failed: could not parse the tool arguments."
+    return {
+      query: "",
+      text: "Web search failed: could not parse the tool arguments.",
+      results: [],
+      errorCode: "invalid_input",
+    }
   }
-  if (!query.trim()) return "Web search failed: empty query."
+  if (!query.trim()) {
+    return {
+      query,
+      text: "Web search failed: empty query.",
+      results: [],
+      errorCode: "invalid_input",
+    }
+  }
 
   try {
     const resp = await callBroker(query, count)
-    return formatResultsForModel(resp)
+    return { query, text: formatResultsForModel(resp), results: resp.results }
   } catch (error) {
     if (error instanceof BrokerExhaustedError) {
-      return "Web search is unavailable: the search quota is exhausted for this period. Answer from your own knowledge and say it may be out of date."
+      return {
+        query,
+        text: "Web search is unavailable: the search quota is exhausted for this period. Answer from your own knowledge and say it may be out of date.",
+        results: [],
+        errorCode: "too_many_requests",
+      }
     }
     consola.error("Web search broker error:", error)
-    return `Web search failed: ${error instanceof Error ? error.message : String(error)}`
+    return {
+      query,
+      text: `Web search failed: ${error instanceof Error ? error.message : String(error)}`,
+      results: [],
+      errorCode: "unavailable",
+    }
   }
+}
+
+// Thin string-only wrapper (back-compat for callers that only need model text).
+export async function runWebSearch(argsJson: string): Promise<string> {
+  return (await runWebSearchDetailed(argsJson)).text
 }

@@ -53,6 +53,46 @@ export interface AnthropicToolUseBlock {
   input: Record<string, unknown>
 }
 
+// Server-side web_search blocks (emulated by the proxy). A server_tool_use block
+// records a query the proxy ran on the model's behalf; the matching
+// web_search_tool_result carries the results. These let Claude Code render the
+// "Did N searches" count and clickable sources.
+export interface AnthropicServerToolUseBlock {
+  type: "server_tool_use"
+  id: string
+  name: "web_search"
+  input: { query: string }
+}
+
+export interface AnthropicWebSearchResultItem {
+  type: "web_search_result"
+  url: string
+  title: string
+  // Opaque token Anthropic uses for multi-turn citation re-submission. The proxy
+  // fetches from Brave/Tavily and has no real token, so we send a placeholder —
+  // Claude Code renders sources from url/title and never decodes this.
+  encrypted_content: string
+  page_age?: string | null
+}
+
+export interface AnthropicWebSearchToolResultError {
+  type: "web_search_tool_result_error"
+  error_code:
+    | "too_many_requests"
+    | "invalid_input"
+    | "max_uses_exceeded"
+    | "query_too_long"
+    | "unavailable"
+}
+
+export interface AnthropicWebSearchToolResultBlock {
+  type: "web_search_tool_result"
+  tool_use_id: string
+  content:
+    | Array<AnthropicWebSearchResultItem>
+    | AnthropicWebSearchToolResultError
+}
+
 export interface AnthropicThinkingBlock {
   type: "thinking"
   thinking: string
@@ -67,6 +107,8 @@ export type AnthropicAssistantContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
   | AnthropicThinkingBlock
+  | AnthropicServerToolUseBlock
+  | AnthropicWebSearchToolResultBlock
 
 export interface AnthropicUserMessage {
   role: "user"
@@ -107,6 +149,9 @@ export interface AnthropicResponse {
     cache_creation_input_tokens?: number
     cache_read_input_tokens?: number
     service_tier?: "standard" | "priority" | "batch"
+    server_tool_use?: {
+      web_search_requests: number
+    }
   }
 }
 
@@ -134,6 +179,10 @@ export interface AnthropicContentBlockStartEvent {
         input: Record<string, unknown>
       })
     | { type: "thinking"; thinking: string }
+    // server_tool_use starts WITHOUT input — the query streams via input_json_delta.
+    | { type: "server_tool_use"; id: string; name: "web_search" }
+    // web_search_tool_result is sent WHOLE here (full content array, no deltas).
+    | AnthropicWebSearchToolResultBlock
 }
 
 export interface AnthropicContentBlockDeltaEvent {
@@ -162,6 +211,9 @@ export interface AnthropicMessageDeltaEvent {
     output_tokens: number
     cache_creation_input_tokens?: number
     cache_read_input_tokens?: number
+    server_tool_use?: {
+      web_search_requests: number
+    }
   }
 }
 
