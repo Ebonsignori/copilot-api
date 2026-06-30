@@ -21,6 +21,13 @@ export interface State {
   // services it against this broker instead of letting the tool_use dangle.
   searchServiceUrl?: string
   searchServiceToken?: string
+
+  // When true (default), /v1/messages forwards straight to Copilot's native
+  // Anthropic endpoint — preserving native `thinking` blocks, signatures, and
+  // token-by-token streaming. When false, the legacy translate-through-OpenAI
+  // path is used instead (a kill-switch for a fast revert without a redeploy).
+  // The web_search emulation pre-branch runs regardless of this flag.
+  anthropicPassthrough: boolean
 }
 
 export const state: State = {
@@ -28,4 +35,5 @@ export const state: State = {
   manualApprove: false,
   rateLimitWait: false,
   showToken: false,
+  anthropicPassthrough: true,
 }

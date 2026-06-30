@@ -13,6 +13,10 @@ const USER_AGENT = `GitHubCopilotChat/${COPILOT_VERSION}`
 
 const API_VERSION = "2025-04-01"
 
+// Anthropic Messages API version, required on the native /v1/messages passthrough
+// (Copilot's native Anthropic endpoint rejects the request without it).
+export const ANTHROPIC_VERSION = "2023-06-01"
+
 export const copilotBaseUrl = (state: State) =>
   state.accountType === "individual" ?
     "https://api.githubcopilot.com"

@@ -17,6 +17,7 @@ import {
   type AnthropicMessagesPayload,
   type AnthropicStreamState,
 } from "./anthropic-types"
+import { handleNativePassthrough } from "./native-passthrough"
 import {
   translateToAnthropic,
   translateToOpenAI,
@@ -32,12 +33,6 @@ export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
-  const openAIPayload = translateToOpenAI(anthropicPayload)
-  consola.debug(
-    "Translated OpenAI request payload:",
-    JSON.stringify(openAIPayload),
-  )
-
   if (state.manualApprove) {
     await awaitApproval()
   }
@@ -45,11 +40,32 @@ export async function handleCompletion(c: Context) {
   // When the request carries Anthropic's server-side web_search tool and a
   // broker is configured, run the search loop entirely server-side (emulating
   // Anthropic's hosted behavior) and return a finished answer. Claude Code's
-  // built-in WebSearch then "just works" through the proxy.
+  // built-in WebSearch then "just works" through the proxy. This pre-branch
+  // depends on the OpenAI translate path and runs regardless of the passthrough
+  // flag (it has no native-endpoint equivalent yet).
   if (webSearchEnabled(anthropicPayload.tools)) {
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+    consola.debug(
+      "Translated OpenAI request payload (web_search):",
+      JSON.stringify(openAIPayload),
+    )
     return handleWebSearch(c, anthropicPayload, openAIPayload)
   }
 
+  // Default: forward straight to Copilot's native Anthropic endpoint so native
+  // `thinking` blocks, signatures, and token-by-token streaming survive intact.
+  if (state.anthropicPassthrough) {
+    consola.debug("Forwarding to native Anthropic endpoint (passthrough)")
+    return handleNativePassthrough(c, anthropicPayload)
+  }
+
+  // Legacy path (kill-switch off): translate through OpenAI /chat/completions.
+  // Drops `thinking` for Claude, but kept as a fast revert.
+  const openAIPayload = translateToOpenAI(anthropicPayload)
+  consola.debug(
+    "Translated OpenAI request payload (legacy):",
+    JSON.stringify(openAIPayload),
+  )
   const response = await createChatCompletions(openAIPayload)
 
   if (isNonStreaming(response)) {

@@ -25,6 +25,7 @@ interface RunServerOptions {
   claudeCode: boolean
   showToken: boolean
   proxyEnv: boolean
+  anthropicPassthrough: boolean
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
@@ -46,6 +47,12 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.rateLimitSeconds = options.rateLimit
   state.rateLimitWait = options.rateLimitWait
   state.showToken = options.showToken
+  state.anthropicPassthrough = options.anthropicPassthrough
+  if (!options.anthropicPassthrough) {
+    consola.info(
+      "Anthropic passthrough disabled — /v1/messages uses the legacy OpenAI translate path",
+    )
+  }
 
   // Web search broker config. Read from the environment (set in the launchd/
   // systemd unit) rather than a CLI flag — it carries a secret token and the
@@ -54,13 +61,18 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.searchServiceUrl = process.env.SEARCH_SERVICE_URL
   state.searchServiceToken = process.env.SEARCH_SERVICE_TOKEN
   if (state.searchServiceUrl && state.searchServiceToken) {
-    consola.info(`Web search interception enabled via ${state.searchServiceUrl}`)
+    consola.info(
+      `Web search interception enabled via ${state.searchServiceUrl}`,
+    )
   }
 
   await ensurePaths()
   await cacheVSCodeVersion()
 
   if (options.githubToken) {
+    // Single-threaded startup: these state writes can't actually interleave, so
+    // the require-atomic-updates flag here is a false positive.
+    // eslint-disable-next-line require-atomic-updates
     state.githubToken = options.githubToken
     consola.info("Using provided GitHub token")
   } else {
@@ -194,6 +206,12 @@ export const start = defineCommand({
       default: false,
       description: "Initialize proxy from environment variables",
     },
+    "anthropic-passthrough": {
+      type: "boolean",
+      default: true,
+      description:
+        "Forward /v1/messages to Copilot's native Anthropic endpoint (preserves thinking + streaming). Use --no-anthropic-passthrough to fall back to the legacy OpenAI translate path.",
+    },
   },
   run({ args }) {
     const rateLimitRaw = args["rate-limit"]
@@ -212,6 +230,7 @@ export const start = defineCommand({
       claudeCode: args["claude-code"],
       showToken: args["show-token"],
       proxyEnv: args["proxy-env"],
+      anthropicPassthrough: args["anthropic-passthrough"],
     })
   },
 })

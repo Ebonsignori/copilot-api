@@ -15,86 +15,90 @@ import {
 
 // --- Request translation: Gemini → Chat Completions ---
 
-export function geminiToCompletions(
-  payload: GeminiGenerateContentRequest,
-  model: string,
-): ChatCompletionsPayload {
+// Translate one Gemini content turn into the OpenAI messages it maps to: an
+// assistant tool_calls message (function calls), tool-result messages (function
+// responses, keyed by per-name occurrence so the ids match the call side), and a
+// text/image message. Pulled out of geminiToCompletions to keep that function's
+// branching below the complexity cap.
+function contentToMessages(content: GeminiContent): Array<Message> {
   const messages: Array<Message> = []
+  const role = content.role === "model" ? "assistant" : "user"
 
-  // System instruction
-  if (payload.systemInstruction?.parts) {
-    const systemText = payload.systemInstruction.parts
-      .map((p) => p.text ?? "")
-      .join("\n\n")
-    if (systemText) {
-      messages.push({ role: "system", content: systemText })
-    }
-  }
+  const functionCallParts = content.parts.filter((p) => p.functionCall)
+  const functionResponseParts = content.parts.filter((p) => p.functionResponse)
+  const textParts = content.parts.filter(
+    (p) => !p.functionCall && !p.functionResponse,
+  )
 
-  // Conversation contents
-  for (const content of payload.contents) {
-    const role = content.role === "model" ? "assistant" : "user"
-
-    // Function call parts → assistant tool_calls message
-    const functionCallParts = content.parts.filter((p) => p.functionCall)
-    const functionResponseParts = content.parts.filter(
-      (p) => p.functionResponse,
-    )
-    const textParts = content.parts.filter(
-      (p) => !p.functionCall && !p.functionResponse,
-    )
-
-    if (functionCallParts.length > 0) {
-      messages.push({
-        role: "assistant",
-        content: null,
-        tool_calls: functionCallParts.map((p, i) => ({
-          id: `call_${p.functionCall!.name}_${i}`,
-          type: "function",
-          function: {
-            name: p.functionCall!.name,
-            arguments: JSON.stringify(p.functionCall!.args),
+  if (functionCallParts.length > 0) {
+    messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: functionCallParts.flatMap((p, i) => {
+        const call = p.functionCall
+        if (!call) return []
+        return [
+          {
+            id: `call_${call.name}_${i}`,
+            type: "function" as const,
+            function: {
+              name: call.name,
+              arguments: JSON.stringify(call.args),
+            },
           },
-        })),
-      })
-    }
+        ]
+      }),
+    })
+  }
 
-    // Function response parts → tool messages
-    for (const part of functionResponseParts) {
+  // Function response parts → tool messages. Track occurrence count per function
+  // name so the ids match the call-side generation: call_<name>_<i> where i is
+  // the per-name occurrence index.
+  const responseOccurrences = new Map<string, number>()
+  for (const part of functionResponseParts) {
+    const fnResponse = part.functionResponse
+    if (!fnResponse) continue
+    const occurrence = responseOccurrences.get(fnResponse.name) ?? 0
+    responseOccurrences.set(fnResponse.name, occurrence + 1)
+    messages.push({
+      role: "tool",
+      tool_call_id: `call_${fnResponse.name}_${occurrence}`,
+      content: JSON.stringify(fnResponse.response),
+    })
+  }
+
+  if (textParts.length > 0) {
+    const hasImage = textParts.some((p) => p.inlineData)
+    if (hasImage) {
       messages.push({
-        role: "tool",
-        tool_call_id: `call_${part.functionResponse!.name}_0`,
-        content: JSON.stringify(part.functionResponse!.response),
-      })
-    }
-
-    // Text/image parts
-    if (textParts.length > 0) {
-      const hasImage = textParts.some((p) => p.inlineData)
-
-      if (!hasImage) {
-        const text = textParts.map((p) => p.text ?? "").join("\n\n")
-        messages.push({ role, content: text })
-      } else {
-        messages.push({
-          role,
-          content: textParts.map((p) => {
-            if (p.inlineData) {
-              return {
-                type: "image_url" as const,
-                image_url: {
-                  url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`,
-                },
-              }
+        role,
+        content: textParts.map((p) =>
+          p.inlineData ?
+            {
+              type: "image_url" as const,
+              image_url: {
+                url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`,
+              },
             }
-            return { type: "text" as const, text: p.text ?? "" }
-          }),
-        })
-      }
+          : { type: "text" as const, text: p.text ?? "" },
+        ),
+      })
+    } else {
+      const text = textParts.map((p) => p.text ?? "").join("\n\n")
+      messages.push({ role, content: text })
     }
   }
 
-  // Tools
+  return messages
+}
+
+// Resolve the OpenAI tools array + tool_choice from a Gemini request's tool
+// declarations and function-calling config. Extracted to keep geminiToCompletions
+// under the complexity cap.
+function resolveTools(payload: GeminiGenerateContentRequest): {
+  tools: Array<Tool> | undefined
+  toolChoice: ChatCompletionsPayload["tool_choice"]
+} {
   const tools: Array<Tool> | undefined = payload.tools
     ?.flatMap((t) => t.functionDeclarations ?? [])
     .map((fn) => ({
@@ -106,21 +110,47 @@ export function geminiToCompletions(
       },
     }))
 
-  // Tool choice
   const modeMap: Record<string, ChatCompletionsPayload["tool_choice"]> = {
     AUTO: "auto",
     ANY: "required",
     NONE: "none",
   }
   const fcMode =
-    payload.toolConfig?.functionCallingConfig?.mode ?? (tools?.length ? "AUTO" : undefined)
+    payload.toolConfig?.functionCallingConfig?.mode
+    ?? (tools?.length ? "AUTO" : undefined)
   const toolChoice = fcMode ? modeMap[fcMode] : undefined
+
+  return { tools: tools && tools.length > 0 ? tools : undefined, toolChoice }
+}
+
+export function geminiToCompletions(
+  payload: GeminiGenerateContentRequest,
+  model: string,
+): ChatCompletionsPayload {
+  const messages: Array<Message> = []
+
+  // System instruction
+  if (payload.systemInstruction) {
+    const systemText = payload.systemInstruction.parts
+      .map((p) => p.text)
+      .join("\n\n")
+    if (systemText) {
+      messages.push({ role: "system", content: systemText })
+    }
+  }
+
+  // Conversation contents
+  for (const content of payload.contents) {
+    messages.push(...contentToMessages(content))
+  }
+
+  const { tools, toolChoice } = resolveTools(payload)
 
   return {
     model,
     messages,
     stream: true,
-    tools: tools && tools.length > 0 ? tools : undefined,
+    tools,
     tool_choice: toolChoice,
     temperature: payload.generationConfig?.temperature,
     top_p: payload.generationConfig?.topP,
@@ -159,15 +189,7 @@ export function completionsToGemini(
         index: 0,
       },
     ],
-    usageMetadata: response.usage
-      ? {
-          promptTokenCount: response.usage.prompt_tokens,
-          candidatesTokenCount: response.usage.completion_tokens,
-          totalTokenCount: response.usage.total_tokens,
-          cachedContentTokenCount:
-            response.usage.prompt_tokens_details?.cached_tokens,
-        }
-      : undefined,
+    usageMetadata: toUsageMetadata(response.usage),
     modelVersion: response.model,
   }
 }
@@ -176,14 +198,18 @@ function mapFinishReason(
   reason: string | null,
 ): GeminiGenerateContentResponse["candidates"][0]["finishReason"] {
   switch (reason) {
-    case "stop":
+    case "stop": {
       return "STOP"
-    case "length":
+    }
+    case "length": {
       return "MAX_TOKENS"
-    case "content_filter":
+    }
+    case "content_filter": {
       return "SAFETY"
-    default:
+    }
+    default: {
       return "FINISH_REASON_UNSPECIFIED"
+    }
   }
 }
 
@@ -196,11 +222,57 @@ export function createGeminiStreamState(): GeminiStreamState {
   }
 }
 
+// Fold one chunk's streamed tool_call deltas into the in-progress accumulator
+// (keyed by tool-call index). Pulled out of completionsChunkToGeminiResponse to
+// keep it under the complexity cap.
+function accumulateToolCalls(
+  toolCalls: NonNullable<
+    ChatCompletionChunk["choices"][number]["delta"]["tool_calls"]
+  >,
+  state: GeminiStreamState,
+): void {
+  for (const tc of toolCalls) {
+    const key = String(tc.index)
+    const inProgress = state.toolCallsInProgress.get(key) ?? {
+      name: "",
+      argsAccum: "",
+    }
+    if (!state.toolCallsInProgress.has(key)) {
+      state.toolCallsInProgress.set(key, inProgress)
+    }
+    if (tc.function?.name) inProgress.name = tc.function.name
+    if (tc.function?.arguments) inProgress.argsAccum += tc.function.arguments
+  }
+}
+
+// Map an OpenAI usage block to Gemini's usageMetadata shape. Shared by the
+// streaming and non-streaming translators (both emit the same fields).
+function toUsageMetadata(
+  usage:
+    | {
+        prompt_tokens: number
+        completion_tokens: number
+        total_tokens: number
+        prompt_tokens_details?: { cached_tokens: number }
+      }
+    | undefined,
+): GeminiGenerateContentResponse["usageMetadata"] {
+  if (!usage) return undefined
+  return {
+    promptTokenCount: usage.prompt_tokens,
+    candidatesTokenCount: usage.completion_tokens,
+    totalTokenCount: usage.total_tokens,
+    cachedContentTokenCount: usage.prompt_tokens_details?.cached_tokens,
+  }
+}
+
 export function completionsChunkToGeminiResponse(
   chunk: ChatCompletionChunk,
   _state: GeminiStreamState,
 ): GeminiGenerateContentResponse | null {
-  const choice = chunk.choices?.[0]
+  // choices is empty on a usage-only terminal chunk, so the element is genuinely
+  // optional at runtime even though the array type doesn't say so.
+  const choice = chunk.choices.at(0)
   if (!choice && !chunk.usage) return null
 
   const parts: GeminiGenerateContentResponse["candidates"][0]["content"]["parts"] =
@@ -212,21 +284,10 @@ export function completionsChunkToGeminiResponse(
 
   // Accumulate and emit tool calls on finish
   if (choice?.delta.tool_calls) {
-    for (const tc of choice.delta.tool_calls) {
-      const key = String(tc.index)
-      if (!_state.toolCallsInProgress.has(key)) {
-        _state.toolCallsInProgress.set(key, {
-          name: tc.function?.name ?? "",
-          argsAccum: "",
-        })
-      }
-      const inProgress = _state.toolCallsInProgress.get(key)!
-      if (tc.function?.name) inProgress.name += tc.function.name
-      if (tc.function?.arguments) inProgress.argsAccum += tc.function.arguments
-    }
+    accumulateToolCalls(choice.delta.tool_calls, _state)
   }
 
-  const finishReason = choice?.finish_reason
+  const finishReason = choice?.finish_reason ?? null
   if (finishReason === "tool_calls") {
     for (const [, tc] of _state.toolCallsInProgress) {
       parts.push({
@@ -249,16 +310,7 @@ export function completionsChunkToGeminiResponse(
         index: 0,
       },
     ],
-    usageMetadata:
-      finishReason && chunk.usage
-        ? {
-            promptTokenCount: chunk.usage.prompt_tokens,
-            candidatesTokenCount: chunk.usage.completion_tokens,
-            totalTokenCount: chunk.usage.total_tokens,
-            cachedContentTokenCount:
-              chunk.usage.prompt_tokens_details?.cached_tokens,
-          }
-        : undefined,
+    usageMetadata: finishReason ? toUsageMetadata(chunk.usage) : undefined,
     modelVersion: chunk.model,
   }
 }
