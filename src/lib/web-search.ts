@@ -5,19 +5,53 @@ import { state } from "./state"
 // Anthropic ships its server-side web search as a tool whose `type` is a dated
 // identifier (web_search_20250305, …) but whose `name` Claude Code sends as
 // "web_search". After translateToOpenAI flattens tools to plain functions only
-// the name survives, so we match on the name.
+// the name survives, so the emulation loop matches on the name.
 export function isWebSearchToolName(name: string | undefined): boolean {
   return name === "web_search"
 }
 
-// True when the request asked for web search AND we have a broker to service it.
-// Without a configured broker we leave the tool alone (legacy dangling behavior)
-// rather than pretend to handle it.
+// The subset of an Anthropic tool we need to tell the SERVER-side web_search tool
+// (which we emulate) apart from a same-named CLIENT tool (which we must NOT touch).
+interface MaybeWebSearchTool {
+  name?: string
+  // The hosted server-tool carries a dated `type` (web_search_20250305, …).
+  type?: string
+  // A normal client tool always ships an input_schema; the hosted server-tool omits it.
+  input_schema?: unknown
+}
+
+// Distinguish Anthropic's HOSTED server-side web_search tool (which Copilot's native
+// endpoint rejects, so WE emulate it) from a client-defined tool that merely happens
+// to be named "web_search". The hosted tool looks like:
+//   { type: "web_search_20250305", name: "web_search" }          ← no input_schema
+// whereas a client tool (e.g. nexus's) looks like:
+//   { name: "web_search", input_schema: { … } }                  ← has a schema, no type
+// Only the hosted shape should trigger the emulation loop; a client tool must flow
+// through the native passthrough so its `tool_use` round-trip (and thinking!) survive.
+export function isServerWebSearchTool(tool: MaybeWebSearchTool): boolean {
+  if (typeof tool.type === "string" && tool.type.startsWith("web_search")) {
+    return true
+  }
+  // Name-only server-tool (older clients omit the dated type): treat as hosted ONLY
+  // when it lacks a usable input_schema — a client tool always provides one.
+  const schema = tool.input_schema
+  const hasSchema =
+    typeof schema === "object"
+    && schema !== null
+    && Object.keys(schema as Record<string, unknown>).length > 0
+  return tool.name === "web_search" && !hasSchema
+}
+
+// True when the request carries Anthropic's HOSTED web_search server-tool AND we
+// have a broker to service it. A client tool named "web_search" does NOT count —
+// it's left in the payload and forwarded to the native endpoint like any other tool.
+// Without a configured broker we leave even the server-tool alone (legacy dangling
+// behavior) rather than pretend to handle it.
 export function webSearchEnabled(
-  tools: Array<{ name: string }> | undefined,
+  tools: Array<MaybeWebSearchTool> | undefined,
 ): boolean {
   if (!state.searchServiceUrl || !state.searchServiceToken) return false
-  return Boolean(tools?.some((t) => isWebSearchToolName(t.name)))
+  return Boolean(tools?.some((t) => isServerWebSearchTool(t)))
 }
 
 export interface BrokerResult {
@@ -41,14 +75,15 @@ export async function callBroker(
   query: string,
   count?: number,
 ): Promise<BrokerResponse> {
-  const url = `${state.searchServiceUrl!.replace(/\/+$/, "")}/search`
+  const baseUrl = state.searchServiceUrl ?? ""
+  const url = `${baseUrl.replace(/\/+$/, "")}/search`
   let res: Response
   try {
     res = await fetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${state.searchServiceToken!}`,
+        authorization: `Bearer ${state.searchServiceToken ?? ""}`,
       },
       body: JSON.stringify({ query, count }),
       signal: AbortSignal.timeout(15000),
@@ -64,7 +99,9 @@ export async function callBroker(
   }
   if (!res.ok) {
     const body = await res.text().catch(() => "")
-    throw new Error(`search broker returned ${res.status}: ${body.slice(0, 200)}`)
+    throw new Error(
+      `search broker returned ${res.status}: ${body.slice(0, 200)}`,
+    )
   }
 
   return (await res.json()) as BrokerResponse
@@ -79,11 +116,11 @@ export function formatResultsForModel(resp: BrokerResponse): string {
   if (resp.results.length === 0) {
     lines.push("No results found.")
   } else {
-    resp.results.forEach((r, i) => {
+    for (const [i, r] of resp.results.entries()) {
       lines.push(`${i + 1}. ${r.title || "(untitled)"}`)
       if (r.url) lines.push(`   ${r.url}`)
       if (r.snippet) lines.push(`   ${r.snippet}`)
-    })
+    }
   }
   lines.push("", `(source: ${resp.provider})`)
   return lines.join("\n")
@@ -112,7 +149,7 @@ export interface SearchRecord {
 export async function runWebSearchDetailed(
   argsJson: string,
 ): Promise<SearchRecord> {
-  let query = ""
+  let query: string
   let count: number | undefined
   try {
     const parsed = JSON.parse(argsJson) as { query?: string; count?: number }
