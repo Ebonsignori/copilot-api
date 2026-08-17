@@ -8,6 +8,7 @@ import { getGitHubUser } from "~/services/github/get-user"
 import { pollAccessToken } from "~/services/github/poll-access-token"
 
 import { HTTPError } from "./error"
+import { retryWithBackoff } from "./retry"
 import { state } from "./state"
 
 const readGithubToken = () => fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
@@ -16,7 +17,10 @@ const writeGithubToken = (token: string) =>
   fs.writeFile(PATHS.GITHUB_TOKEN_PATH, token)
 
 export const setupCopilotToken = async () => {
-  const { token, refresh_in } = await getCopilotToken()
+  const { token, refresh_in } = await retryWithBackoff(
+    "fetch Copilot token",
+    getCopilotToken,
+  )
   state.copilotToken = token
 
   // Display the Copilot token to the screen
@@ -25,21 +29,36 @@ export const setupCopilotToken = async () => {
     consola.info("Copilot token:", token)
   }
 
-  const refreshInterval = (refresh_in - 60) * 1000
-  setInterval(async () => {
-    consola.debug("Refreshing Copilot token")
-    try {
-      const { token } = await getCopilotToken()
-      state.copilotToken = token
-      consola.debug("Copilot token refreshed")
-      if (state.showToken) {
-        consola.info("Refreshed Copilot token:", token)
-      }
-    } catch (error) {
-      consola.error("Failed to refresh Copilot token:", error)
-      throw error
-    }
-  }, refreshInterval)
+  scheduleCopilotTokenRefresh((refresh_in - 60) * 1000)
+}
+
+function scheduleCopilotTokenRefresh(delayMs: number) {
+  setTimeout(
+    () => {
+      void refreshCopilotToken()
+    },
+    Math.max(delayMs, 0),
+  )
+}
+
+// Unlike the old setInterval-based refresh, this never lets a failure
+// propagate out of the timer callback: a rejection there becomes an
+// unhandled promise rejection, and Node kills the whole process for it
+// (taking down every in-flight request, not just the stale token). Failures
+// now retry with backoff via retryWithBackoff and simply keep the previous
+// token in place until a refresh succeeds.
+async function refreshCopilotToken() {
+  consola.debug("Refreshing Copilot token")
+  const { token, refresh_in } = await retryWithBackoff(
+    "refresh Copilot token",
+    getCopilotToken,
+  )
+  state.copilotToken = token
+  consola.debug("Copilot token refreshed")
+  if (state.showToken) {
+    consola.info("Refreshed Copilot token:", token)
+  }
+  scheduleCopilotTokenRefresh((refresh_in - 60) * 1000)
 }
 
 interface SetupGitHubTokenOptions {

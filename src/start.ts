@@ -8,6 +8,7 @@ import invariant from "tiny-invariant"
 
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
+import { retryWithBackoff } from "./lib/retry"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
@@ -80,7 +81,7 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   }
 
   await setupCopilotToken()
-  await cacheModels()
+  await retryWithBackoff("fetch model list", cacheModels)
 
   consola.info(
     `Available models: \n${state.models?.data.map((model) => `- ${model.id}`).join("\n")}`,
