@@ -7,6 +7,7 @@ import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
 import { ensurePaths } from "./lib/paths"
+import { installProcessGuards } from "./lib/process-guard"
 import { initProxyFromEnv } from "./lib/proxy"
 import { retryWithBackoff } from "./lib/retry"
 import { generateEnvScript } from "./lib/shell"
@@ -30,6 +31,11 @@ interface RunServerOptions {
 }
 
 export async function runServer(options: RunServerOptions): Promise<void> {
+  // Keep the proxy alive through transient upstream/broker outages (e.g. the
+  // Tailscale-only search broker when off-tailnet) instead of letting a dangling
+  // fetch rejection crash-loop the whole server. Install before any network I/O.
+  installProcessGuards()
+
   if (options.proxyEnv) {
     initProxyFromEnv()
   }
