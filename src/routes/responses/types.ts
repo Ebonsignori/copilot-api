@@ -58,7 +58,7 @@ export interface LocalShellCallItem {
   type: "local_shell_call"
   call_id: string
   status?: string
-  action?: { type: string; command: string[] }
+  action?: { type: string; command: Array<string> }
 }
 
 export interface CustomToolCallItem {
@@ -129,8 +129,10 @@ export interface ResponsesApiPayload {
   input: Array<ResponseItem>
   instructions?: string
   tools?: Array<ToolSpec>
-  tool_choice?: string
+  // "auto" | "required" | "none", or the object form that pins one function.
+  tool_choice?: string | { type: "function"; name: string }
   parallel_tool_calls?: boolean
+  max_output_tokens?: number
   reasoning?: {
     effort?: "low" | "medium" | "high"
     summary?: "auto" | "concise" | "detailed" | "none"

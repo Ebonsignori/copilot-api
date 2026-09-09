@@ -28,6 +28,12 @@ export interface State {
   // path is used instead (a kill-switch for a fast revert without a redeploy).
   // The web_search emulation pre-branch runs regardless of this flag.
   anthropicPassthrough: boolean
+
+  // When true (default), /v1/messages routes models that Copilot serves only on
+  // /responses (every recent GPT, incl. gpt-6-astra) through the Anthropic <->
+  // Responses bridge. When false those models fail as before — a kill-switch for
+  // a fast revert without a redeploy.
+  responsesBridge: boolean
 }
 
 export const state: State = {
@@ -36,4 +42,5 @@ export const state: State = {
   rateLimitWait: false,
   showToken: false,
   anthropicPassthrough: true,
+  responsesBridge: true,
 }

@@ -42,6 +42,11 @@ interface ModelCapabilities {
 export interface Model {
   capabilities: ModelCapabilities
   id: string
+  // Which upstream API shapes Copilot serves this model on, e.g.
+  // ["/v1/messages", "/chat/completions"] for Claude, ["/responses"] for every
+  // recent GPT. Drives which outbound path /v1/messages takes — see
+  // isResponsesOnlyModel in routes/messages/responses-bridge.ts.
+  supported_endpoints?: Array<string>
   model_picker_enabled: boolean
   name: string
   object: string

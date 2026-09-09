@@ -22,6 +22,7 @@ import {
   translateToAnthropic,
   translateToOpenAI,
 } from "./non-stream-translation"
+import { handleResponsesBridge, isResponsesOnlyModel } from "./responses-bridge"
 import { translateChunkToAnthropicEvents } from "./stream-translation"
 import { anthropicResponseToStreamEvents } from "./synthesize-stream"
 import { buildSearchBlocks } from "./web-search-blocks"
@@ -35,6 +36,21 @@ export async function handleCompletion(c: Context) {
 
   if (state.manualApprove) {
     await awaitApproval()
+  }
+
+  // Models Copilot serves ONLY on /responses (every recent GPT, incl. gpt-6-astra)
+  // can reach neither the native Anthropic endpoint nor /chat/completions. They take
+  // the Responses bridge instead. This sits above the web_search branch on purpose:
+  // that branch is hard-wired to /chat/completions, so for these models it could only
+  // fail -- server-side web_search stays a Claude-only feature for now.
+  if (
+    state.responsesBridge
+    && isResponsesOnlyModel(anthropicPayload.model, state)
+  ) {
+    consola.debug(
+      `Routing ${anthropicPayload.model} through the Responses bridge`,
+    )
+    return handleResponsesBridge(c, anthropicPayload)
   }
 
   // When the request carries Anthropic's server-side web_search tool and a

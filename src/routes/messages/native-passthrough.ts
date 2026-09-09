@@ -35,7 +35,7 @@ import {
 
 // True if any message carries an Anthropic image block — drives the Copilot
 // vision header, the same way create-chat-completions detects OpenAI image_url.
-function hasImageBlock(payload: AnthropicMessagesPayload): boolean {
+export function hasImageBlock(payload: AnthropicMessagesPayload): boolean {
   return payload.messages.some(
     (msg) =>
       Array.isArray(msg.content)
@@ -47,7 +47,7 @@ function hasImageBlock(payload: AnthropicMessagesPayload): boolean {
 
 // Agent vs user, for the X-Initiator header (mirrors create-chat-completions): a
 // turn is "agent" once the assistant has spoken or a tool_result is being fed back.
-function isAgentCall(messages: Array<AnthropicMessage>): boolean {
+export function isAgentCall(messages: Array<AnthropicMessage>): boolean {
   return messages.some(
     (msg) =>
       msg.role === "assistant"

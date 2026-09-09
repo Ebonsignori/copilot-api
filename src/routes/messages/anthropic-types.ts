@@ -96,6 +96,11 @@ export interface AnthropicWebSearchToolResultBlock {
 export interface AnthropicThinkingBlock {
   type: "thinking"
   thinking: string
+  // Opaque round-trip token. For Claude this is Anthropic's own signature. For
+  // models bridged from the Responses API it carries the reasoning item's
+  // `encrypted_content`, so the client hands the chain of thought back to us on
+  // the next turn and we can rebuild the reasoning item — see responses-translation.
+  signature?: string
 }
 
 export type AnthropicUserContentBlock =
