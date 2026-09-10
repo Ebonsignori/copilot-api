@@ -18,6 +18,8 @@ import { randomUUID } from "node:crypto"
 import type {
   FunctionCallItem,
   FunctionCallOutputItem,
+  InputImageContent,
+  InputTextContent,
   FunctionTool,
   MessageContentItem,
   ReasoningItem,
@@ -30,6 +32,8 @@ import type {
 import type {
   AnthropicAssistantContentBlock,
   AnthropicAssistantMessage,
+  AnthropicImageBlock,
+  AnthropicToolResultBlock,
   AnthropicMessage,
   AnthropicMessagesPayload,
   AnthropicResponse,
@@ -52,16 +56,155 @@ function systemToInstructions(
   return system.map((block: AnthropicTextBlock) => block.text).join("\n\n")
 }
 
-// Claude Code sends a token budget; Responses wants a coarse effort bucket.
-function budgetToEffort(
-  thinking: AnthropicMessagesPayload["thinking"],
+// Effort, weakest to strongest. Anthropic and Copilot use the same five names, so
+// the mapping is identity -- the work here is defaulting and clamping.
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const
+type Effort = (typeof EFFORT_ORDER)[number]
+
+// Anthropic's documented API default is `high` ("setting effort to high produces
+// exactly the same behavior as omitting the parameter"). Copilot's default is
+// `medium`. Sending nothing therefore silently runs a notch weaker than the same
+// session would on Claude, so we send `high` explicitly instead of omitting it.
+const DEFAULT_EFFORT: Effort = "high"
+
+// Measured stall threshold. Sweeping max_output_tokens x effort on a real prompt:
+// `high` and `xhigh` completed at every budget down to 512, `max` came back
+// `incomplete` at 512 (468 reasoning tokens, 103 chars of text), and an earlier repro
+// stalled xhigh outright at 64. So the risk is confined to tiny budgets, and the cap
+// is set just above the smallest verified-safe point rather than guessed at. Capping
+// effort is the right lever -- raising max_output_tokens would overrun the client's
+// own limit. The ceiling is `high` (Anthropic's default), so a normal request is
+// never downgraded.
+const SMALL_OUTPUT_BUDGET = 1024
+const SMALL_BUDGET_EFFORT_CEILING = "high"
+// Copilot rejects a max_output_tokens below this.
+const MIN_OUTPUT_TOKENS = 16
+
+// Clamp to the strongest level the model actually advertises. gpt-5.5 / gpt-5.4 400
+// on "max", which would otherwise make /effort max lock a user out of those models
+// entirely. An unknown model (empty list) is left alone rather than guessed at.
+export function clampEffort(
+  requested: Effort,
+  supported: Array<string> | undefined,
+): Effort {
+  if (!supported || supported.length === 0) return requested
+  const allowed = EFFORT_ORDER.filter((level) => supported.includes(level))
+  if (allowed.length === 0) return requested
+  const wanted = EFFORT_ORDER.indexOf(requested)
+  const atOrBelow = allowed.filter(
+    (level) => EFFORT_ORDER.indexOf(level) <= wanted,
+  )
+  return atOrBelow.length > 0 ? (atOrBelow.at(-1) as Effort) : allowed[0]
+}
+
+function requestedEffort(payload: AnthropicMessagesPayload): Effort {
+  // output_config.effort is the modern control -- /effort, --effort and
+  // CLAUDE_CODE_EFFORT_LEVEL all set it, and on adaptive-reasoning models it is the
+  // only one with any effect. Observed on the wire: ultracode arrives here as
+  // "xhigh"; it is a client behavior, not a sixth level.
+  const explicit = payload.output_config?.effort
+  if (explicit && (EFFORT_ORDER as ReadonlyArray<string>).includes(explicit)) {
+    return explicit
+  }
+
+  const thinking = payload.thinking
+  // Responses has no "off", so the honest floor for a client that disabled thinking
+  // is the weakest level -- otherwise background calls pay for reasoning they
+  // explicitly turned off.
+  if (thinking?.type === "disabled") return "low"
+
+  // Legacy fixed-budget form. Real Claude Code never sends budget_tokens (it sends
+  // thinking.type adaptive|disabled), so this only serves older Anthropic clients.
+  const budget = thinking?.budget_tokens
+  if (budget !== undefined) {
+    if (budget < 4096) return "low"
+    if (budget < 16384) return "medium"
+    return "high"
+  }
+  return DEFAULT_EFFORT
+}
+
+function resolveReasoning(
+  payload: AnthropicMessagesPayload,
+  supportedEfforts?: Array<string>,
 ): ResponsesApiPayload["reasoning"] {
-  if (thinking?.type !== "enabled") return undefined
-  const budget = thinking.budget_tokens
-  if (budget === undefined) return { effort: "medium", summary: "auto" }
-  if (budget < 4096) return { effort: "low", summary: "auto" }
-  if (budget < 16384) return { effort: "medium", summary: "auto" }
-  return { effort: "high", summary: "auto" }
+  let effort = requestedEffort(payload)
+
+  if (
+    payload.max_tokens < SMALL_OUTPUT_BUDGET
+    && EFFORT_ORDER.indexOf(effort)
+      > EFFORT_ORDER.indexOf(SMALL_BUDGET_EFFORT_CEILING)
+  ) {
+    effort = SMALL_BUDGET_EFFORT_CEILING
+  }
+
+  return { effort: clampEffort(effort, supportedEfforts), summary: "auto" }
+}
+
+// Copilot rejects the ENTIRE request when a tool schema carries a `pattern` its
+// validator cannot compile. Measured against the live endpoint with strict mode off:
+//   accepted -> plain patterns, and lookaround ((?!..), (?=..), (?<=..), (?<!..))
+//   rejected -> unicode property escapes (\p{..} / \P{..}) and named groups ((?<n>..))
+// Only those two dialects are dropped, so ordinary constraints -- including Agent's
+// ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ and Artifact's lookahead paths -- still reach the
+// model as guidance. A dropped pattern costs a hint; a kept one that fails to
+// compile costs the entire request.
+const UNSUPPORTED_REGEX = /\\p\{|\(\?<[A-Z_]/i
+
+export function stripSchemaPatterns(value: unknown): unknown {
+  if (Array.isArray(value))
+    return value.map((item) => stripSchemaPatterns(item))
+  if (typeof value !== "object" || value === null) return value
+
+  const out: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      key === "pattern"
+      && typeof child === "string"
+      && UNSUPPORTED_REGEX.test(child)
+    ) {
+      continue
+    }
+    out[key] = stripSchemaPatterns(child)
+  }
+  return out
+}
+
+function imageToInputImage(block: AnthropicImageBlock): InputImageContent {
+  return {
+    type: "input_image",
+    image_url: `data:${block.source.media_type};base64,${block.source.data}`,
+  }
+}
+
+// Anthropic tool results carry either a string or a block array, and the block
+// types are Anthropic's own ("text", "image"). Responses rejects those names
+// outright -- `Invalid value: 'text'. Supported values are: 'input_text', ...` -- and
+// that 400 kills the whole request, so every block has to be renamed on the way
+// through rather than forwarded verbatim.
+function toolResultOutput(
+  block: AnthropicToolResultBlock,
+): FunctionCallOutputItem["output"] {
+  if (typeof block.content === "string") return block.content
+
+  const parts: Array<InputTextContent | InputImageContent> = []
+  for (const part of block.content) {
+    if (part.type === "text") {
+      parts.push({ type: "input_text", text: part.text })
+      // The declared union says anything not "text" must be "image", so this check
+      // looks redundant to the type checker. It isn't: the wire is not bound by our
+      // types, and this file has already been broken twice by real payloads carrying
+      // shapes the types didn't predict. Match explicitly and drop the rest.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    } else if (part.type === "image") {
+      parts.push(imageToInputImage(part))
+    }
+    // Anything else is dropped. Forwarding an unrecognized block would either send
+    // a name Responses rejects (400, whole request lost) or dereference fields the
+    // block doesn't have; a missing part only costs the model some context.
+  }
+  // Responses wants a string or a non-empty array; "" is the safe empty form.
+  return parts.length > 0 ? parts : ""
 }
 
 function userBlocksToItems(message: AnthropicUserMessage): Array<ResponseItem> {
@@ -85,10 +228,7 @@ function userBlocksToItems(message: AnthropicUserMessage): Array<ResponseItem> {
         break
       }
       case "image": {
-        parts.push({
-          type: "input_image",
-          image_url: `data:${block.source.media_type};base64,${block.source.data}`,
-        })
+        parts.push(imageToInputImage(block))
         break
       }
       case "tool_result": {
@@ -101,7 +241,7 @@ function userBlocksToItems(message: AnthropicUserMessage): Array<ResponseItem> {
         const output: FunctionCallOutputItem = {
           type: "function_call_output",
           call_id: block.tool_use_id,
-          output: block.content,
+          output: toolResultOutput(block),
         }
         items.push(output)
         break
@@ -202,7 +342,16 @@ function toolsToResponses(
       type: "function",
       name: tool.name,
       description: tool.description,
-      parameters: tool.input_schema,
+      // Copilot defaults function tools to strict mode, which forces EVERY property
+      // into `required` -- even ones the client declared optional. The model must
+      // then emit all of them, so a tool documented as "provide at most one of name
+      // or path" becomes impossible to call correctly and the caller loops on
+      // validation errors. Opting out restores optional parameters; Copilot honors it.
+      strict: false,
+      parameters: stripSchemaPatterns(tool.input_schema) as Record<
+        string,
+        unknown
+      >,
     }),
   )
 }
@@ -231,6 +380,7 @@ function toolChoiceToResponses(
 
 export function anthropicToResponsesPayload(
   payload: AnthropicMessagesPayload,
+  supportedEfforts?: Array<string>,
 ): ResponsesApiPayload {
   return {
     model: payload.model,
@@ -238,8 +388,8 @@ export function anthropicToResponsesPayload(
     instructions: systemToInstructions(payload.system),
     tools: toolsToResponses(payload.tools),
     tool_choice: toolChoiceToResponses(payload.tool_choice),
-    reasoning: budgetToEffort(payload.thinking),
-    max_output_tokens: payload.max_tokens,
+    reasoning: resolveReasoning(payload, supportedEfforts),
+    max_output_tokens: Math.max(payload.max_tokens, MIN_OUTPUT_TOKENS),
     stream: payload.stream,
     // Without this the reasoning items come back with no encrypted_content and
     // the chain of thought cannot survive a tool-call round trip.

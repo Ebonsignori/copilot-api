@@ -35,7 +35,7 @@ import {
 
 // True if any message carries an Anthropic image block — drives the Copilot
 // vision header, the same way create-chat-completions detects OpenAI image_url.
-export function hasImageBlock(payload: AnthropicMessagesPayload): boolean {
+function hasImageBlock(payload: AnthropicMessagesPayload): boolean {
   return payload.messages.some(
     (msg) =>
       Array.isArray(msg.content)

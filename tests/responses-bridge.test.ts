@@ -214,6 +214,7 @@ describe("anthropicToResponsesPayload", () => {
         type: "function",
         name: "calc",
         description: undefined,
+        strict: false,
         parameters: { type: "object" },
       },
     ])
@@ -240,7 +241,6 @@ describe("anthropicToResponsesPayload", () => {
       basePayload({ thinking: { type: "enabled", budget_tokens: 32000 } }),
     )
     expect(high.reasoning?.effort).toBe("high")
-    expect(anthropicToResponsesPayload(basePayload()).reasoning).toBeUndefined()
   })
 })
 
@@ -485,5 +485,33 @@ describe("streaming translation", () => {
       "message_delta",
       "message_stop",
     ])
+  })
+})
+
+describe("effort", () => {
+  test("passes output_config.effort straight through, including xhigh and max", () => {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
+      const p = anthropicToResponsesPayload(
+        basePayload({ output_config: { effort } }),
+      )
+      expect(p.reasoning?.effort).toBe(effort)
+    }
+  })
+
+  test("prefers an explicit effort over a thinking budget", () => {
+    const p = anthropicToResponsesPayload(
+      basePayload({
+        output_config: { effort: "max" },
+        thinking: { type: "enabled", budget_tokens: 1024 },
+      }),
+    )
+    expect(p.reasoning?.effort).toBe("max")
+  })
+
+  test("still buckets a thinking budget when no effort is set", () => {
+    const p = anthropicToResponsesPayload(
+      basePayload({ thinking: { type: "enabled", budget_tokens: 1024 } }),
+    )
+    expect(p.reasoning?.effort).toBe("low")
   })
 })

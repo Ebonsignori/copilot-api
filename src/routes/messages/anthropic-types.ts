@@ -19,8 +19,17 @@ export interface AnthropicMessagesPayload {
     name?: string
   }
   thinking?: {
-    type: "enabled"
+    // Observed on the wire from Claude Code: "adaptive" (32/61 captured requests) and
+    // "disabled" (27/61). "enabled" is the older fixed-budget form and never appeared;
+    // budget_tokens was null in every captured request.
+    type: "enabled" | "adaptive" | "disabled"
     budget_tokens?: number
+  }
+  // The modern effort control. Claude Code's /effort, --effort and
+  // CLAUDE_CODE_EFFORT_LEVEL all land here rather than in `thinking`, and on
+  // adaptive-reasoning models it is the ONLY thinking control that has any effect.
+  output_config?: {
+    effort?: "low" | "medium" | "high" | "xhigh" | "max"
   }
   service_tier?: "auto" | "standard_only"
 }
@@ -42,7 +51,10 @@ export interface AnthropicImageBlock {
 export interface AnthropicToolResultBlock {
   type: "tool_result"
   tool_use_id: string
-  content: string
+  // A tool result is a string OR a block array. Claude Code sends the array form
+  // for anything richer than plain text -- subagent results, screenshots -- so the
+  // array case is the common one in agentic sessions, not an edge case.
+  content: string | Array<AnthropicTextBlock | AnthropicImageBlock>
   is_error?: boolean
 }
 

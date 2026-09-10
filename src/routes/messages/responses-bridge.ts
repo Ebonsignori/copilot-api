@@ -8,6 +8,7 @@
 // Structured like native-passthrough.ts: a pure request builder (unit-testable with
 // no network or token) separated from the fetch.
 import type { Context } from "hono"
+import type { ContentfulStatusCode } from "hono/utils/http-status"
 
 import consola from "consola"
 import { events } from "fetch-event-stream"
@@ -16,12 +17,11 @@ import { streamSSE } from "hono/streaming"
 import type { ResponsesApiResponse } from "~/routes/responses/types"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
-import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 
 import type { AnthropicMessagesPayload } from "./anthropic-types"
 
-import { hasImageBlock, isAgentCall } from "./native-passthrough"
+import { isAgentCall } from "./native-passthrough"
 import {
   createResponsesStreamState,
   translateResponsesEventToAnthropicEvents,
@@ -46,6 +46,85 @@ export function isResponsesOnlyModel(
   return endpoints.includes("/responses") && !endpoints.includes("/v1/messages")
 }
 
+// The shared image check in native-passthrough only scans top-level message blocks.
+// An image returned INSIDE a tool_result -- a screenshot tool's output, which is the
+// usual way images enter an agentic session -- therefore never sets the vision
+// header, and Copilot drops the image silently: no error, just a model that says it
+// received nothing. Scan nested tool_result content as well.
+//
+// NOTE: the native passthrough has the same blind spot on the Claude path; left alone
+// here rather than changing behavior that isn't part of this bridge.
+export function payloadHasImage(payload: AnthropicMessagesPayload): boolean {
+  return payload.messages.some((message) => {
+    if (!Array.isArray(message.content)) return false
+    return message.content.some((block) => {
+      if (block.type === "image") return true
+      if (block.type !== "tool_result") return false
+      const nested = (block as { content?: unknown }).content
+      return (
+        Array.isArray(nested)
+        && nested.some((part) => (part as { type?: string }).type === "image")
+      )
+    })
+  })
+}
+
+// The effort levels this model actually accepts, straight from the catalog. Used to
+// clamp: gpt-5.5 and gpt-5.4 reject "max" with a 400, so an unclamped /effort max
+// would lock a user out of those models entirely.
+export function supportedEfforts(
+  modelId: string,
+  currentState: typeof state,
+): Array<string> | undefined {
+  return currentState.models?.data.find((m) => m.id === modelId)?.capabilities
+    .supports.reasoning_effort
+}
+
+// Copilot reports failures as an OpenAI-shaped body, and often double-encodes it -- a
+// JSON string nested inside error.message. Forwarded verbatim it reaches the client as
+// an escaped blob instead of a readable sentence. Unwrap to the innermost message and
+// re-emit in Anthropic's envelope so clients render it properly.
+export function toAnthropicError(
+  status: number,
+  body: string,
+): { type: "error"; error: { type: string; message: string } } {
+  let message = body
+  for (let depth = 0; depth < 3; depth++) {
+    try {
+      const parsed = JSON.parse(message) as unknown
+      const errorField = (parsed as { error?: { message?: unknown } }).error
+      const inner = errorField?.message
+      if (typeof inner === "string") {
+        message = inner
+        continue
+      }
+      if (typeof parsed === "string") {
+        message = parsed
+        continue
+      }
+    } catch {
+      break
+    }
+    break
+  }
+
+  const byStatus: Record<number, string> = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+  }
+  return {
+    type: "error",
+    error: {
+      type: byStatus[status] ?? (status >= 500 ? "api_error" : "api_error"),
+      message: message.trim(),
+    },
+  }
+}
+
 export interface ResponsesBridgeRequest {
   url: string
   headers: Record<string, string>
@@ -56,11 +135,14 @@ export function buildResponsesRequest(
   payload: AnthropicMessagesPayload,
   currentState: typeof state,
 ): ResponsesBridgeRequest {
-  const responsesPayload = anthropicToResponsesPayload(payload)
+  const responsesPayload = anthropicToResponsesPayload(
+    payload,
+    supportedEfforts(payload.model, currentState),
+  )
   return {
     url: `${copilotBaseUrl(currentState)}/responses`,
     headers: {
-      ...copilotHeaders(currentState, hasImageBlock(payload)),
+      ...copilotHeaders(currentState, payloadHasImage(payload)),
       "X-Initiator": isAgentCall(payload.messages) ? "agent" : "user",
       ...(payload.stream === true && { accept: "text/event-stream" }),
     },
@@ -84,7 +166,12 @@ export async function handleResponsesBridge(
   })
 
   if (!response.ok) {
-    throw new HTTPError("Failed to call Copilot /responses", response)
+    const body = await response.text()
+    const shaped = toAnthropicError(response.status, body)
+    consola.error(
+      `Copilot /responses ${response.status}: ${shaped.error.message}`,
+    )
+    return c.json(shaped, response.status as ContentfulStatusCode)
   }
 
   if (!payload.stream) {

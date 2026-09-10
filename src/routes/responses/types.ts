@@ -134,7 +134,7 @@ export interface ResponsesApiPayload {
   parallel_tool_calls?: boolean
   max_output_tokens?: number
   reasoning?: {
-    effort?: "low" | "medium" | "high"
+    effort?: "low" | "medium" | "high" | "xhigh" | "max"
     summary?: "auto" | "concise" | "detailed" | "none"
   }
   stream?: boolean

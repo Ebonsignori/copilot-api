@@ -28,6 +28,9 @@ interface ModelSupports {
   tool_calls?: boolean
   parallel_tool_calls?: boolean
   dimensions?: boolean
+  // Which reasoning efforts this model accepts. Astra takes all five; gpt-5.5 and
+  // gpt-5.4 reject "max" with a 400, so the bridge clamps against this list.
+  reasoning_effort?: Array<string>
 }
 
 interface ModelCapabilities {
