@@ -13,7 +13,7 @@ import { retryWithBackoff } from "./lib/retry"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { setupCopilotToken, setupGitHubToken } from "./lib/token"
-import { cacheModels, cacheVSCodeVersion } from "./lib/utils"
+import { cacheModels } from "./lib/utils"
 import { server } from "./server"
 
 interface RunServerOptions {
@@ -74,7 +74,6 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   }
 
   await ensurePaths()
-  await cacheVSCodeVersion()
 
   if (options.githubToken) {
     // Single-threaded startup: these state writes can't actually interleave, so

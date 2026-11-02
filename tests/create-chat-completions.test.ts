@@ -7,7 +7,6 @@ import { createChatCompletions } from "../src/services/copilot/create-chat-compl
 
 // Mock state
 state.copilotToken = "test-token"
-state.vsCodeVersion = "1.0.0"
 state.accountType = "individual"
 
 // Helper to mock fetch

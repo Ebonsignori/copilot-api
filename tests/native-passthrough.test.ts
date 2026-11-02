@@ -19,7 +19,6 @@ function fakeState(overrides: Partial<State> = {}): State {
     anthropicPassthrough: true,
     responsesBridge: true,
     copilotToken: "tid=test-token",
-    vsCodeVersion: "1.104.3",
     ...overrides,
   }
 }
