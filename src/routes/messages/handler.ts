@@ -4,6 +4,11 @@ import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import {
+  brokerUnavailableMessage,
+  checkBrokerHealth,
+} from "~/lib/broker-health"
+import { ProxyStatusError } from "~/lib/error"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { webSearchEnabled } from "~/lib/web-search"
@@ -60,6 +65,20 @@ export async function handleCompletion(c: Context) {
   // depends on the OpenAI translate path and runs regardless of the passthrough
   // flag (it has no native-endpoint equivalent yet).
   if (webSearchEnabled(anthropicPayload.tools)) {
+    // Preflight the broker before entering the loop. Without this, an unreachable
+    // broker costs up to HARD_CAP rounds x the 15s search timeout before silently
+    // degrading to "search unavailable" — the 445s/696s requests in the proxy log.
+    // With it the client gets a 503 naming the actual fix in ~2s, and instantly on
+    // retry from the cached verdict.
+    const health = await checkBrokerHealth()
+    if (!health.reachable) {
+      throw new ProxyStatusError(
+        503,
+        "api_error",
+        brokerUnavailableMessage(health),
+      )
+    }
+
     const openAIPayload = translateToOpenAI(anthropicPayload)
     consola.debug(
       "Translated OpenAI request payload (web_search):",

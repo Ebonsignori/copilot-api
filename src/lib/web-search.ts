@@ -1,5 +1,7 @@
 import consola from "consola"
 
+import { markBrokerUnreachable } from "./broker-health"
+import { isTransientNetworkError } from "./process-guard"
 import { state } from "./state"
 
 // Anthropic ships its server-side web search as a tool whose `type` is a dated
@@ -89,8 +91,11 @@ export async function callBroker(
       signal: AbortSignal.timeout(15000),
     })
   } catch (error) {
+    // Keep the original as `cause`: isTransientNetworkError walks the chain to
+    // find the real errno (ECONNRESET/EHOSTUNREACH/…) that a flat message loses.
     throw new Error(
       `search broker unreachable: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     )
   }
 
@@ -184,6 +189,16 @@ export async function runWebSearchDetailed(
         errorCode: "too_many_requests",
       }
     }
+    // A transport failure means the broker is gone (typically the tailnet went
+    // down mid-turn). Record it so the loop's remaining rounds fail instantly
+    // rather than each burning the full 15s timeout. Quota/HTTP errors are NOT
+    // reachability problems, so they deliberately don't land here.
+    if (isTransientNetworkError(error)) {
+      markBrokerUnreachable(
+        error instanceof Error ? error.message : "transport failure",
+      )
+    }
+
     consola.error("Web search broker error:", error)
     return {
       query,
