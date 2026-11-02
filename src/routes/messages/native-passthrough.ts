@@ -4,8 +4,8 @@
 // -> Anthropic round-trip (which silently drops `thinking` blocks for Claude — see
 // non-stream-translation's "GitHub Copilot doesn't generate thinking blocks"), we
 // forward the request to Copilot's native Anthropic endpoint
-// (`{copilotBaseUrl}/v1/messages`) with only newer top-level fields the Copilot
-// upstream rejects (e.g. `context_management`) stripped out. That endpoint returns real `thinking` blocks +
+// (`{copilotBaseUrl}/v1/messages`) with only the newer fields the Copilot upstream
+// rejects (e.g. `context_management`) stripped or rewritten. That endpoint returns real `thinking` blocks +
 // signatures and streams them per the Anthropic spec, so by piping its SSE straight
 // back we preserve thinking_delta / signature_delta / tool_use and any future block
 // type with zero translation.
@@ -69,14 +69,30 @@ export interface NativeAnthropicRequest {
 // drop them before forwarding. Everything else is forwarded verbatim.
 const UNSUPPORTED_TOP_LEVEL_FIELDS = ["context_management"] as const
 
-// Strip the unsupported top-level fields from a copy of the payload, leaving the
-// original untouched. Returns the sanitized payload and the names of any fields
-// that were removed (for debug logging).
+// Per-message fields the endpoint rejects the same way (`messages.N.<field>: Extra
+// inputs are not permitted`). Claude Code's per-turn-control beta sets
+// output_config on individual turns; the top-level output_config, which carries
+// the effort, is accepted and left alone.
+const UNSUPPORTED_MESSAGE_FIELDS: ReadonlyArray<string> = ["output_config"]
+
+// `thinking.display` values the endpoint accepts. Interactive Claude Code also
+// sends "highlights", rejected with `thinking.adaptive.display: Input should be
+// 'summarized', 'omitted'`. Anything else becomes "summarized", the closest
+// accepted value: the client still gets readable thinking back.
+const SUPPORTED_THINKING_DISPLAYS: ReadonlySet<unknown> = new Set([
+  "summarized",
+  "omitted",
+])
+const FALLBACK_THINKING_DISPLAY = "summarized"
+
+// Strip or rewrite what the endpoint rejects, on a copy of the payload, leaving
+// the original untouched. Returns the sanitized payload and what was changed (for
+// debug logging).
 export function sanitizeNativeAnthropicPayload(
   payload: AnthropicMessagesPayload,
 ): { payload: AnthropicMessagesPayload; removed: Array<string> } {
   const source = payload as unknown as Record<string, unknown>
-  const removed = UNSUPPORTED_TOP_LEVEL_FIELDS.filter(
+  const removed: Array<string> = UNSUPPORTED_TOP_LEVEL_FIELDS.filter(
     (field) => field in source,
   )
   const sanitized = Object.fromEntries(
@@ -85,9 +101,37 @@ export function sanitizeNativeAnthropicPayload(
         !(UNSUPPORTED_TOP_LEVEL_FIELDS as ReadonlyArray<string>).includes(key),
     ),
   )
+
+  const thinking = payload.thinking
+  if (
+    thinking?.display !== undefined
+    && !SUPPORTED_THINKING_DISPLAYS.has(thinking.display)
+  ) {
+    sanitized.thinking = { ...thinking, display: FALLBACK_THINKING_DISPLAY }
+    removed.push(`thinking.display=${JSON.stringify(thinking.display)}`)
+  }
+
+  const messages = payload.messages as unknown as Array<Record<string, unknown>>
+  if (
+    messages.some((msg) =>
+      UNSUPPORTED_MESSAGE_FIELDS.some((field) => field in msg),
+    )
+  ) {
+    sanitized.messages = messages.map((msg) =>
+      Object.fromEntries(
+        Object.entries(msg).filter(
+          ([key]) => !UNSUPPORTED_MESSAGE_FIELDS.includes(key),
+        ),
+      ),
+    )
+    removed.push(
+      ...UNSUPPORTED_MESSAGE_FIELDS.map((field) => `messages[].${field}`),
+    )
+  }
+
   return {
     payload: sanitized as unknown as AnthropicMessagesPayload,
-    removed: [...removed],
+    removed,
   }
 }
 
@@ -105,8 +149,8 @@ export function buildNativeAnthropicRequest(
       "anthropic-version": ANTHROPIC_VERSION,
       "X-Initiator": isAgentCall(sanitized.messages) ? "agent" : "user",
     },
-    // Forward the inbound payload (model included — see header note) minus the
-    // unsupported top-level fields stripped above.
+    // Forward the inbound payload (model included — see header note) minus what
+    // the sanitizer above strips or rewrites.
     body: JSON.stringify(sanitized),
   }
 }
@@ -124,7 +168,7 @@ export async function handleNativePassthrough(
   const { removed } = sanitizeNativeAnthropicPayload(payload)
   if (removed.length > 0) {
     consola.debug(
-      `Stripped unsupported top-level field(s) before native forward: ${removed.join(", ")}`,
+      `Sanitized unsupported field(s) before native forward: ${removed.join(", ")}`,
     )
   }
 

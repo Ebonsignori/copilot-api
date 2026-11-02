@@ -24,6 +24,10 @@ export interface AnthropicMessagesPayload {
     // budget_tokens was null in every captured request.
     type: "enabled" | "adaptive" | "disabled"
     budget_tokens?: number
+    // How thinking comes back: "omitted" (Claude Code print mode), "summarized",
+    // or "highlights" (interactive). Copilot's native endpoint only accepts the
+    // first two; see sanitizeNativeAnthropicPayload.
+    display?: string
   }
   // The modern effort control. Claude Code's /effort, --effort and
   // CLAUDE_CODE_EFFORT_LEVEL all land here rather than in `thinking`, and on

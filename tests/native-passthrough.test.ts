@@ -183,4 +183,58 @@ describe("sanitizeNativeAnthropicPayload", () => {
       (original as unknown as Record<string, unknown>).context_management,
     ).toBeDefined()
   })
+
+  test("rewrites thinking.display 'highlights' to 'summarized'", () => {
+    // Interactive Claude Code sends "highlights"; upstream rejects it with
+    // "thinking.adaptive.display: Input should be 'summarized', 'omitted'".
+    const original = basePayload({
+      thinking: { type: "adaptive", display: "highlights" },
+    })
+    const { payload, removed } = sanitizeNativeAnthropicPayload(original)
+    expect(payload.thinking).toEqual({
+      type: "adaptive",
+      display: "summarized",
+    })
+    expect(removed).toEqual(['thinking.display="highlights"'])
+    expect(original.thinking?.display).toBe("highlights")
+  })
+
+  test("leaves accepted thinking.display values alone", () => {
+    for (const display of ["summarized", "omitted"]) {
+      const { payload, removed } = sanitizeNativeAnthropicPayload(
+        basePayload({ thinking: { type: "adaptive", display } }),
+      )
+      expect(payload.thinking).toEqual({ type: "adaptive", display })
+      expect(removed).toEqual([])
+    }
+  })
+
+  test("leaves thinking without a display alone", () => {
+    const { payload, removed } = sanitizeNativeAnthropicPayload(
+      basePayload({ thinking: { type: "adaptive" } }),
+    )
+    expect(payload.thinking).toEqual({ type: "adaptive" })
+    expect(removed).toEqual([])
+  })
+
+  test("strips per-message output_config but keeps the top-level one", () => {
+    // Claude Code's per-turn-control beta puts output_config on single turns;
+    // upstream rejects it with "messages.1.output_config: Extra inputs are not
+    // permitted". The top-level output_config carries the effort and is accepted.
+    const original = basePayload({
+      output_config: { effort: "xhigh" },
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "user", content: "again", output_config: { effort: "low" } },
+      ] as never,
+    })
+    const { payload, removed } = sanitizeNativeAnthropicPayload(original)
+    expect(payload.messages).toEqual([
+      { role: "user", content: "hi" },
+      { role: "user", content: "again" },
+    ])
+    expect(payload.output_config).toEqual({ effort: "xhigh" })
+    expect(removed).toEqual(["messages[].output_config"])
+    expect("output_config" in original.messages[1]).toBe(true)
+  })
 })
