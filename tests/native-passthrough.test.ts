@@ -145,7 +145,7 @@ describe("buildNativeAnthropicRequest", () => {
     expect(req.headers["copilot-vision-request"]).toBe("true")
   })
 
-  test("strips context_management (Copilot upstream rejects it as an extra input)", () => {
+  test("strips context_management when its beta wasn't sent (upstream rejects it as an extra input)", () => {
     const req = buildNativeAnthropicRequest(
       basePayload({
         context_management: {
@@ -159,6 +159,17 @@ describe("buildNativeAnthropicRequest", () => {
     // The rest of the payload must survive untouched.
     expect(body.model).toBe("claude-opus-4-8")
     expect(body.messages).toEqual([{ role: "user", content: "hi" }])
+  })
+
+  test("forwards the client's anthropic-beta header", () => {
+    const beta = "claude-code-20250219,per-turn-control-2026-07-01"
+    const req = buildNativeAnthropicRequest(basePayload(), fakeState(), beta)
+    expect(req.headers["anthropic-beta"]).toBe(beta)
+  })
+
+  test("sends no anthropic-beta header when the client sent none", () => {
+    const req = buildNativeAnthropicRequest(basePayload(), fakeState())
+    expect("anthropic-beta" in req.headers).toBe(false)
   })
 })
 
@@ -217,24 +228,42 @@ describe("sanitizeNativeAnthropicPayload", () => {
     expect(removed).toEqual([])
   })
 
-  test("strips per-message output_config but keeps the top-level one", () => {
-    // Claude Code's per-turn-control beta puts output_config on single turns;
-    // upstream rejects it with "messages.1.output_config: Extra inputs are not
-    // permitted". The top-level output_config carries the effort and is accepted.
-    const original = basePayload({
-      output_config: { effort: "xhigh" },
-      messages: [
-        { role: "user", content: "hi" },
-        { role: "user", content: "again", output_config: { effort: "low" } },
-      ] as never,
-    })
-    const { payload, removed } = sanitizeNativeAnthropicPayload(original)
-    expect(payload.messages).toEqual([
+  test("strips safeguards even with Claude Code's betas", () => {
+    // Upstream rejects it with "safeguards: Extra inputs are not permitted"
+    // whatever betas are sent; Claude Code retries without it anyway.
+    const { payload, removed } = sanitizeNativeAnthropicPayload(
+      basePayload({ safeguards: [{ type: "x" }] } as never),
+      "claude-code-20250219,per-turn-control-2026-07-01",
+    )
+    expect(removed).toEqual(["safeguards"])
+    expect("safeguards" in payload).toBe(false)
+  })
+
+  test("keeps context_management when the client sent its beta", () => {
+    // With the beta flag forwarded, upstream accepts the field.
+    const { payload, removed } = sanitizeNativeAnthropicPayload(
+      basePayload({ context_management: {} } as never),
+      "claude-code-20250219,context-management-2025-06-27",
+    )
+    expect(removed).toEqual([])
+    expect("context_management" in payload).toBe(true)
+  })
+
+  test("leaves a per-turn system message's output_config alone", () => {
+    // Claude Code's per-turn-control beta sends directive-only system turns
+    // ({ role: "system", content: [], output_config }). Upstream accepts them when
+    // the beta is forwarded; stripping output_config left an empty system turn,
+    // rejected with "system content must contain at least one block".
+    const messages = [
       { role: "user", content: "hi" },
+      { role: "system", content: [], output_config: { effort: "low" } },
       { role: "user", content: "again" },
-    ])
-    expect(payload.output_config).toEqual({ effort: "xhigh" })
-    expect(removed).toEqual(["messages[].output_config"])
-    expect("output_config" in original.messages[1]).toBe(true)
+    ] as never
+    const { payload, removed } = sanitizeNativeAnthropicPayload(
+      basePayload({ messages }),
+      "per-turn-control-2026-07-01",
+    )
+    expect(payload.messages).toEqual(messages)
+    expect(removed).toEqual([])
   })
 })
