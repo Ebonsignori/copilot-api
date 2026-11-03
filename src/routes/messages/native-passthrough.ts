@@ -25,6 +25,7 @@ import {
   copilotHeaders,
 } from "~/lib/api-config"
 import { HTTPError } from "~/lib/error"
+import { describeError } from "~/lib/process-guard"
 import { state } from "~/lib/state"
 
 import {
@@ -32,6 +33,7 @@ import {
   type AnthropicMessage,
   type AnthropicMessagesPayload,
 } from "./anthropic-types"
+import { withErrorEventOnDrop } from "./stream-drop"
 
 // True if any message carries an Anthropic image block — drives the Copilot
 // vision header, the same way create-chat-completions detects OpenAI image_url.
@@ -171,6 +173,7 @@ export async function handleNativePassthrough(
   }
 
   const req = buildNativeAnthropicRequest(payload, state, anthropicBeta)
+  const sent = Date.now()
   const response = await fetch(req.url, {
     method: "POST",
     headers: req.headers,
@@ -187,7 +190,14 @@ export async function handleNativePassthrough(
   if (payload.stream && response.body) {
     // Pipe the native Anthropic SSE straight back — no translation, so thinking_delta
     // / signature_delta / content_block_* arrive exactly as Copilot emits them.
-    return new Response(response.body, {
+    // A stream Copilot closes partway ends with an error event the client can
+    // retry on, rather than a cut connection (see stream-drop.ts).
+    const body = withErrorEventOnDrop(response.body, (error) => {
+      consola.warn(
+        `Copilot closed a ${payload.model} stream after ${Math.round((Date.now() - sent) / 1000)} s, before the answer was finished: ${describeError(error)}. Sent the client an error event to retry on.`,
+      )
+    })
+    return new Response(body, {
       status: response.status,
       headers: {
         "content-type":

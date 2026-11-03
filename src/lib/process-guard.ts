@@ -94,7 +94,8 @@ function describeCause(cause: unknown): string {
   return text ? ` (cause: ${text})` : " (cause: [non-Error value])"
 }
 
-function describe(reason: unknown): string {
+// One line for the log: the error, and the cause undici nests under it.
+export function describeError(reason: unknown): string {
   if (!(reason instanceof Error)) {
     return messageOf(reason) || "[non-Error value]"
   }
@@ -113,7 +114,7 @@ export function installProcessGuards(): void {
   process.on("unhandledRejection", (reason) => {
     if (isTransientNetworkError(reason)) {
       consola.warn(
-        `Survived a transient upstream network failure (unhandled rejection): ${describe(reason)}`,
+        `Survived a transient upstream network failure (unhandled rejection): ${describeError(reason)}`,
       )
       return
     }
@@ -126,7 +127,7 @@ export function installProcessGuards(): void {
   process.on("uncaughtException", (error) => {
     if (isTransientNetworkError(error)) {
       consola.warn(
-        `Survived a transient upstream network failure (uncaught exception): ${describe(error)}`,
+        `Survived a transient upstream network failure (uncaught exception): ${describeError(error)}`,
       )
       return
     }
