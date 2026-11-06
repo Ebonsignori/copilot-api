@@ -13,6 +13,7 @@ import {
 } from "~/services/copilot/create-chat-completions"
 
 import type { GeminiGenerateContentRequest } from "./gemini-types"
+
 import {
   completionsChunkToGeminiResponse,
   completionsToGemini,
@@ -20,17 +21,22 @@ import {
   geminiToCompletions,
 } from "./translation"
 
-export async function handleGenerateContent(c: Context) {
+export async function handleGenerateContent(
+  c: Context,
+  model: string,
+  isStreaming: boolean,
+) {
   await checkRateLimit(state)
 
-  const model = c.req.param("model")
   const payload = await c.req.json<GeminiGenerateContentRequest>()
-  const isStreaming = c.req.path.includes("streamGenerateContent")
 
   consola.debug(
     `Gemini ${isStreaming ? "stream" : ""}generateContent for model: ${model}`,
   )
-  consola.debug("Gemini request payload:", JSON.stringify(payload).slice(0, 400))
+  consola.debug(
+    "Gemini request payload:",
+    JSON.stringify(payload).slice(0, 400),
+  )
 
   const openAIPayload = geminiToCompletions(payload, model)
   openAIPayload.stream = isStreaming
@@ -64,7 +70,10 @@ export async function handleGenerateContent(c: Context) {
       if (!rawEvent.data) continue
 
       const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-      const geminiResponse = completionsChunkToGeminiResponse(chunk, streamState)
+      const geminiResponse = completionsChunkToGeminiResponse(
+        chunk,
+        streamState,
+      )
 
       if (geminiResponse) {
         consola.debug("Gemini stream chunk:", JSON.stringify(geminiResponse))
