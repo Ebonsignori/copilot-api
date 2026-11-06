@@ -20,6 +20,11 @@ export const modelRoutes = new Hono()
 //                         and supports (tool_calls, parallel_tool_calls,
 //                         reasoning_effort, vision, streaming, …), as Copilot
 //                         sends them
+//   copilot_billing       { token_prices }: Copilot's price tiers (default, and
+//                         long_context above the default's max_prompt_tokens),
+//                         in AIU per batch_size tokens; absent when the catalog
+//                         has none. The rest of `billing` (which plans may use
+//                         the model, the auto discount) isn't passed on.
 // Not `capabilities`, `max_input_tokens` or `max_tokens`: Anthropic's ModelInfo
 // defines those with other shapes, and Anthropic clients read them.
 export function toModelEntry(model: Model) {
@@ -33,6 +38,10 @@ export function toModelEntry(model: Model) {
     display_name: model.name,
     supported_endpoints: model.supported_endpoints,
     copilot_capabilities: model.capabilities,
+    copilot_billing:
+      model.billing?.token_prices ?
+        { token_prices: model.billing.token_prices }
+      : undefined,
   }
 }
 

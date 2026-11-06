@@ -56,7 +56,32 @@ interface ModelCapabilities {
   type: string
 }
 
+// One price tier, in AIU per batch_size tokens. Tiers apply up to their
+// max_prompt_tokens: "default" first, then "long_context".
+interface ModelTokenTier {
+  input_price?: number
+  output_price?: number
+  cache_read_price?: number
+  cache_write_price?: number
+  cache_write_1h_price?: number
+  image_input_price?: number
+  image_output_price?: number
+  max_prompt_tokens?: number
+}
+
+interface ModelBilling {
+  auto_discount?: number
+  restricted_to?: Array<string>
+  token_prices?: {
+    batch_size?: number
+    preferred_tier?: string
+    default?: ModelTokenTier
+    long_context?: ModelTokenTier
+  }
+}
+
 export interface Model {
+  billing?: ModelBilling
   capabilities: ModelCapabilities
   id: string
   // Which upstream API shapes Copilot serves this model on, e.g.

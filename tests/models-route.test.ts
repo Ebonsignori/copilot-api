@@ -21,6 +21,27 @@ const opus = {
   preview: false,
   model_picker_enabled: true,
   supported_endpoints: ["/v1/messages", "/chat/completions"],
+  billing: {
+    auto_discount: 0.1,
+    restricted_to: ["pro_plus", "business"],
+    token_prices: {
+      batch_size: 1000000,
+      default: {
+        input_price: 400,
+        output_price: 2000,
+        cache_read_price: 20,
+        cache_write_price: 500,
+        max_prompt_tokens: 200000,
+      },
+      long_context: {
+        input_price: 400,
+        output_price: 2000,
+        cache_read_price: 20,
+        cache_write_price: 500,
+        max_prompt_tokens: 1000000,
+      },
+    },
+  },
   capabilities: {
     family: "claude-opus-5.5",
     object: "model_capabilities",
@@ -67,6 +88,7 @@ const old = {
   name: "GPT-4o",
   vendor: "Azure OpenAI",
   supported_endpoints: undefined,
+  billing: undefined,
   capabilities: {
     ...opus.capabilities,
     limits: { max_output_tokens: 4096, max_prompt_tokens: 64000 },
@@ -117,6 +139,13 @@ describe("toModelEntry", () => {
     expect(toModelEntry(opus).copilot_capabilities.supports.vision).toBe(true)
   })
 
+  test("adds the price tiers, and only them of the billing", () => {
+    expect(toModelEntry(opus).copilot_billing).toEqual({
+      token_prices: opus.billing.token_prices,
+    })
+    expect(toModelEntry(old).copilot_billing).toBeUndefined()
+  })
+
   test("adds nothing under the names Anthropic's ModelInfo gives other shapes", () => {
     const entry = toModelEntry(opus)
     expect(entry).not.toHaveProperty("capabilities")
@@ -152,9 +181,11 @@ describe("GET /v1/models", () => {
       "display_name",
       "supported_endpoints",
       "copilot_capabilities",
+      "copilot_billing",
     ])
     expect(body.data[0].copilot_capabilities).toEqual(opus.capabilities)
-    // A model the catalog lists no endpoints for has no supported_endpoints key.
+    // A model the catalog lists no endpoints or prices for has no key for them.
     expect(body.data[2]).not.toHaveProperty("supported_endpoints")
+    expect(body.data[2]).not.toHaveProperty("copilot_billing")
   })
 })
