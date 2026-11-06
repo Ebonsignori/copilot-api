@@ -15,12 +15,22 @@ import {
 
 // --- Request translation: Gemini → Chat Completions ---
 
+// The ids given to the latest model turn's function calls that no function
+// response has taken yet, by function name, oldest first.
+type PendingCalls = Map<string, Array<string>>
+
 // Translate one Gemini content turn into the OpenAI messages it maps to: an
 // assistant tool_calls message (function calls), tool-result messages (function
-// responses, keyed by per-name occurrence so the ids match the call side), and a
-// text/image message. Pulled out of geminiToCompletions to keep that function's
-// branching below the complexity cap.
-function contentToMessages(content: GeminiContent): Array<Message> {
+// responses), and a text/image message. Gemini's parts carry no ids, so the
+// calls get ids here (`turn` keeps them unique in the conversation), and each
+// response takes the id of the oldest call of its name still waiting. Pulled
+// out of geminiToCompletions to keep that function's branching below the
+// complexity cap.
+function contentToMessages(
+  content: GeminiContent,
+  turn: number,
+  pending: PendingCalls,
+): Array<Message> {
   const messages: Array<Message> = []
   const role = content.role === "model" ? "assistant" : "user"
 
@@ -31,15 +41,18 @@ function contentToMessages(content: GeminiContent): Array<Message> {
   )
 
   if (functionCallParts.length > 0) {
+    pending.clear()
     messages.push({
       role: "assistant",
       content: null,
       tool_calls: functionCallParts.flatMap((p, i) => {
         const call = p.functionCall
         if (!call) return []
+        const id = `call_${call.name}_${turn}_${i}`
+        pending.set(call.name, [...(pending.get(call.name) ?? []), id])
         return [
           {
-            id: `call_${call.name}_${i}`,
+            id,
             type: "function" as const,
             function: {
               name: call.name,
@@ -51,18 +64,19 @@ function contentToMessages(content: GeminiContent): Array<Message> {
     })
   }
 
-  // Function response parts → tool messages. Track occurrence count per function
-  // name so the ids match the call-side generation: call_<name>_<i> where i is
-  // the per-name occurrence index.
-  const responseOccurrences = new Map<string, number>()
-  for (const part of functionResponseParts) {
+  // Function response parts → tool messages, each with its call's id. The ids
+  // used to be call_<name>_<i> with i counted over all of a turn's calls on one
+  // side and per name on the other, so a turn calling two different functions
+  // sent results Copilot couldn't match to their calls (a 400). A response with
+  // no call waiting gets an id of its own; Copilot will say what's wrong.
+  for (const [i, part] of functionResponseParts.entries()) {
     const fnResponse = part.functionResponse
     if (!fnResponse) continue
-    const occurrence = responseOccurrences.get(fnResponse.name) ?? 0
-    responseOccurrences.set(fnResponse.name, occurrence + 1)
     messages.push({
       role: "tool",
-      tool_call_id: `call_${fnResponse.name}_${occurrence}`,
+      tool_call_id:
+        pending.get(fnResponse.name)?.shift()
+        ?? `call_${fnResponse.name}_${turn}_${i}`,
       content: JSON.stringify(fnResponse.response),
     })
   }
@@ -140,8 +154,9 @@ export function geminiToCompletions(
   }
 
   // Conversation contents
-  for (const content of payload.contents) {
-    messages.push(...contentToMessages(content))
+  const pending: PendingCalls = new Map()
+  for (const [turn, content] of payload.contents.entries()) {
+    messages.push(...contentToMessages(content, turn, pending))
   }
 
   const { tools, toolChoice } = resolveTools(payload)
