@@ -17,11 +17,19 @@ export interface ModelsResponse {
   object: string
 }
 
+// The catalog's fields as of 2026-11, all optional: each model lists only some.
+// Anything else Copilot adds passes through /v1/models untyped.
 interface ModelLimits {
   max_context_window_tokens?: number
   max_output_tokens?: number
+  max_non_streaming_output_tokens?: number
   max_prompt_tokens?: number
   max_inputs?: number
+  vision?: {
+    max_prompt_image_size?: number
+    max_prompt_images?: number
+    supported_media_types?: Array<string>
+  }
 }
 
 interface ModelSupports {
@@ -31,6 +39,12 @@ interface ModelSupports {
   // Which reasoning efforts this model accepts. Astra takes all five; gpt-5.5 and
   // gpt-5.4 reject "max" with a 400, so the bridge clamps against this list.
   reasoning_effort?: Array<string>
+  adaptive_thinking?: boolean
+  max_thinking_budget?: number
+  min_thinking_budget?: number
+  streaming?: boolean
+  structured_outputs?: boolean
+  vision?: boolean
 }
 
 interface ModelCapabilities {
